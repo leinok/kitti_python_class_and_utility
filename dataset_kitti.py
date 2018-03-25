@@ -168,19 +168,29 @@ class KITTIReader(BaseDataReader):
                                 np.logical_and( velo[:, 1] >= cfg.bottom, velo[:, 1] <= cfg.top))
                                     , np.logical_and( velo[:, 2] >= cfg.low, velo[:, 2] <= cfg.high))
             velo = velo[avail_idx, :]
-            
+           
+    def camera_to_lidar(x, y, z):
+        p = np.array([x, y, z, 1])
+        p = np.matmul(np.linalg.inv(np.array(cfg.MATRIX_R_RECT_0)), p)
+        p = np.matmul(np.linalg.inv(np.array(cfg.MATRIX_T_VELO_2_CAM)), p)
+        p = p[:3]
+        return tuple(p)
+
     def gt_worker(self, filelist):
-        interested_objects = ["Car", "Pedestrian", "Cyclist", "Van", "Truck"]
-        bbox3D_dir = self._get3DBoxDirs()
-        for frame_id in filelist:
-            bbox3D_name = os.path.join(bbox3D_dir, "bbox_%06d.txt" % frame_id)
-            with open(bbox3D_name, 'r') as fh:
-                line = fh.readline()
-                while line:
-                    obj_type = line.split(" ")[0]
-                    corners = np.asarray(line.split(" ")[1:-1], dtype=np.float32).reshape(-1, 3)
-                    
-                    line = fh.readline()
+        """
+        Generate the ground truth
+        """
+#        interested_objects = ["Car", "Pedestrian", "Cyclist", "Van", "Truck"]
+#        bbox3D_dir = self._get3DBoxDirs()
+#        for frame_id in filelist:
+#            bbox3D_name = os.path.join(bbox3D_dir, "bbox_%06d.txt" % frame_id)
+#            with open(bbox3D_name, 'r') as fh:
+#                line = fh.readline()
+#                while line:
+#                    obj_type = line.split(" ")[0]
+#                    corners = np.asarray(line.split(" ")[1:-1], dtype=np.float32).reshape(-1, 3)
+#                    
+#                    line = fh.readline()
 #            with open(bbox3D_name, 'r') as fh:
 #                data = np.loadtxt(fh, 
 #                            dtype={'names': ('col1', 'col2', 'col3', 'col4', 'col5', 'col6', 'col7', 'col8', 'col9', 'col10', 'col11', 'col12',
@@ -190,6 +200,67 @@ class KITTIReader(BaseDataReader):
 #                
 #                print data.shape
 
+    
+        for frame_id in filelist:
+            # The following works
+            #boxMatrix = self.generateBoxMatrix(frame_id, "lidar")
+            f_label = '/mnt/data_0/kitti/training/label_2/' + "%06d.txt" % frame_id
+            label = []
+            label = [line for line in open(f_label, 'r').readlines()]
+            batch_gt_boxes3d = self.label_to_gt_box3d(label, "Car", "lidar")
+            print batch_gt_boxes3d
+
+     
+    def label_to_gt_box3d(self, labels, cls='Car', coordinate='camera'):
+        # Input:
+        #   label: (N, N')
+        #   cls: 'Car' or 'Pedestrain' or 'Cyclist'
+        #   coordinate: 'camera' or 'lidar'
+        # Output:
+        #   (N, N', 7)
+        boxes3d = []
+        if cls == 'Car':
+            acc_cls = ['Car', 'Van']
+        elif cls == 'Pedestrian':
+            acc_cls = ['Pedestrian']
+        elif cls == 'Cyclist':
+            acc_cls = ['Cyclist']
+        else: # all
+            acc_cls = []
+
+        boxes3d_a_label = []
+        for line in labels:
+            ret = line.split()
+            if ret[0] in acc_cls or acc_cls == []:
+                h, w, l, x, y, z, r = [float(i) for i in ret[-7:]]
+                box3d = np.array([x, y, z, h, w, l, r])
+                boxes3d_a_label.append(box3d)
+            if coordinate.lower() == "lidar":
+                boxes3d_a_label = self.cameraToLidarBox(np.array(boxes3d_a_label))
+
+        return boxes3d_a_label
+    
+    def cameraToLidarBox(self, boxes):
+        # (N, 7) -> (N, 7) x,y,z,h,w,l,r
+        ret = []
+        for box in boxes:
+            x, y, z, h, w, l, ry = box
+            (x, y, z), h, w, l, rz = self.cameraToLidar(
+                (x, y, z), self.calibration['velo2cam'], self.calibration['rect']), h, w, l, -ry - np.pi / 2
+            rz = self.angleInLimit(rz)
+            ret.append([x, y, z, h, w, l, rz])
+        return np.array(ret).reshape(-1, 7)
+
+    def angleInLimit(self, angle):
+        # To limit the angle in -pi/2 - pi/2
+        limit_degree = 5
+        while angle >= np.pi / 2:
+            angle -= np.pi
+        while angle < -np.pi / 2:
+            angle += np.pi
+        if abs(angle + np.pi / 2) < limit_degree / 180 * np.pi:
+            angle = np.pi / 2
+        return angle
 
     def convertLabelToGroundTruth(self):
         """
@@ -235,7 +306,7 @@ class KITTIReader(BaseDataReader):
         label = kitti._getFrameLabels(frame_id)
         interested_list = ["car", "van"]
         idx_gt =  [counter for counter, value in enumerate(label) if value['category'] in interested_list]
-        label_matrix = np.zeros((len(idx_gt), 7))
+        label_matrix = np.zeros((len(idx_gt), 8))
 
         for i in xrange(len(idx_gt)):
             label_matrix[i, 0] = label[idx_gt[i]]['bbox3D']['location']['x'] 
@@ -244,14 +315,27 @@ class KITTIReader(BaseDataReader):
             label_matrix[i, 3] = label[idx_gt[i]]['bbox3D']['dimensions']['length'] 
             label_matrix[i, 4] = label[idx_gt[i]]['bbox3D']['dimensions']['width'] 
             label_matrix[i, 5] = label[idx_gt[i]]['bbox3D']['dimensions']['height']
+
+            angle_in_cam = label[idx_gt[i]]['bbox3D']['rotation_t']
+            angle_in_lidar = -angle_in_cam - np.pi/2
+
             label_matrix[i, 6] = label[idx_gt[i]]['bbox3D']['rotation_y']
+            if label[idx_gt[i]]['category'] == "car" or label[idx_gt[i]]['category'] == "van":
+                label_matrix[i, 7] = 1.0
+            elif label[idx_gt[i]]['category'] == "pedestrian":
+                label_matrix[i, 7] = 2.0
+            elif label[idx_gt[i]]['category'] == "cyclist":
+                label_matrix[i, 7] = 3.0
 
         if coor.lower() == "lidar":
             label_matrix[:, :3] = kitti.cameraToLidar(label_matrix[:, :3],
                                  calibration['velo2cam'], calibration['rect'])    
-            label_matrix[:, -1] *= -1
-            label_matrix[:, -1] -= np.pi / 2
-            
+
+
+            label_matrix[:, -2] *= -1
+            label_matrix[:, -2] -= np.pi / 2
+           
+
         return label_matrix
 
 class KITTIObjectsReader(KITTIReader):
@@ -299,12 +383,113 @@ class KITTIObjectsReader(KITTIReader):
         print("Nothing")
 
 
+def generateBoxMatrix(frame_id, kitti, coor="lidar"):
+    """
+    make a 3D box from label in camera
+    If generate 3d bbox in lidar coordinate, make sure perform the following 2 steps: 
+    1, convert location (center point) from camera into lidar
+    2, yaw_angle = -yaw_angle - np.pi / 2
+
+    """
+    calibration = kitti._getCamCalibration(frame_id)
+
+    with open(os.path.join("/mnt/raid1/Research/VoxelNet/voxelnet/predictions/123/data", "%06d.txt" % frame_id), 'r') as f:
+        text_data = [[value for value in line.split(" ")] for line in f.read().split('\n') if line]
+
+    idx_gt = 0
+    for i in range(len(text_data)):
+        if text_data[i][0] == 'Car':
+            idx_gt += 1
+        
+    label_matrix = np.zeros((idx_gt, 7))
+    for i in range(idx_gt):
+        label_matrix[i, 0] = float(text_data[i][-5])
+        label_matrix[i, 1] = float(text_data[i][-4]) - float(text_data[i][-8]) / 2. 
+        label_matrix[i, 2] = float(text_data[i][-3])
+        label_matrix[i, 3] = float(text_data[i][-6])
+        label_matrix[i, 4] = float(text_data[i][-7])
+        label_matrix[i, 5] = float(text_data[i][-8])
+        label_matrix[i, 6] = float(text_data[i][-2])
+
+    if coor.lower() == "lidar":
+        label_matrix[:, :3] = kitti.cameraToLidar(label_matrix[:, :3],
+                             calibration['velo2cam'], calibration['rect'])    
+        label_matrix[:, -1] *= -1
+        label_matrix[:, -1] -= np.pi / 2
+        
+    return label_matrix
+
+
+def label_to_gt_box3d(labels, cls='Car', coordinate='camera'):
+    # Input:
+    #   label: (N, N')
+    #   cls: 'Car' or 'Pedestrain' or 'Cyclist'
+    #   coordinate: 'camera' or 'lidar'
+    # Output:
+    #   (N, N', 7)
+    boxes3d = []
+    if cls == 'Car':
+        acc_cls = ['Car', 'Van']
+    elif cls == 'Pedestrian':
+        acc_cls = ['Pedestrian']
+    elif cls == 'Cyclist':
+        acc_cls = ['Cyclist']
+    else: # all
+        acc_cls = []
+
+    for label in labels:
+        boxes3d_a_label = []
+        for line in label:
+            ret = line.split()
+            if ret[0] in acc_cls or acc_cls == []:
+                h, w, l, x, y, z, r = [float(i) for i in ret[-7:]]
+                box3d = np.array([x, y, z, h, w, l, r])
+                boxes3d_a_label.append(box3d)
+        if coordinate == 'lidar':
+            boxes3d_a_label = camera_to_lidar_box(np.array(boxes3d_a_label))
+
+        boxes3d.append(np.array(boxes3d_a_label).reshape(-1, 7))
+    return boxes3d
+
+def camera_to_lidar_box(boxes):
+    # (N, 7) -> (N, 7) x,y,z,h,w,l,r
+    ret = []
+    for box in boxes:
+        x, y, z, h, w, l, ry = box
+        (x, y, z), h, w, l, rz = camera_to_lidar(
+            x, y, z), h, w, l, -ry - np.pi / 2
+        rz = angle_in_limit(rz)
+        ret.append([x, y, z, h, w, l, rz])
+    return np.array(ret).reshape(-1, 7)
+
+def angle_in_limit(angle):
+    # To limit the angle in -pi/2 - pi/2
+    limit_degree = 5
+    while angle >= np.pi / 2:
+        angle -= np.pi
+    while angle < -np.pi / 2:
+        angle += np.pi
+    if abs(angle + np.pi / 2) < limit_degree / 180 * np.pi:
+        angle = np.pi / 2
+    return angle
+
+def generateTightBox():
+    f_label = '/mnt/data_0/kitti/training/label_2/000008.txt'
+    label = []
+    label.append([line for line in open(f_label, 'r').readlines()])
+    batch_gt_boxes3d = label_to_gt_box3d(label, cls="Car", coordinate="lidar")
+    print batch_gt_boxes3d 
+
 if __name__ == "__main__":
     data_dir = '/mnt/data_0/kitti/training'
-    data_dir = '/mnt/raid1/Research/VoxelNet/voxelnet/data/training_data/verify_data_augmentation'
+    #data_dir = '/mnt/raid1/Research/VoxelNet/voxelnet/data/training_data/validation'
+    #data_dir = '/mnt/raid1/Research/VoxelNet/voxelnet/data/training_data/verify_data_augmentation'
     kitti = KITTIObjectsReader(data_dir)
-    #kitti.convertLabelToGroundTruth()
-    frame_id = int(sys.argv[1])
-    pc = kitti._getLidarPoints(frame_id)
-    label_matrix = kitti.generateBoxMatrix(frame_id, "Lidar")
-    showPC(pc, label_matrix)
+    pdb.set_trace()
+    kitti.convertLabelToGroundTruth()
+
+    #frame_id = int(sys.argv[1])
+    #pc = kitti._getLidarPoints(frame_id)
+    #label_matrix = kitti.generateBoxMatrix(frame_id, "Lidar")
+    #prediction_matrix = generateBoxMatrix(frame_id, kitti)
+    #showPC(pc, label_matrix)

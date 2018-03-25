@@ -10,7 +10,7 @@ import cv2
 import argparse
 import sys
 
-def showPC(point_cloud, bbox3D_label=None):
+def showPC(point_cloud, bbox3D_label=None, prediction_label=None):
     """
     Show point cloud using pyqtopengl,
     bbox3D_label is a ndarray(n, 7) --> (x, y, z, l, w, h, yaw_angle)
@@ -41,12 +41,18 @@ def showPC(point_cloud, bbox3D_label=None):
     specified_area = np.where((z > -2.0) & (z < 2.5) & (x > 30) & (x < 35))[0]
     #n, bins, patches = plt.hist(point_cloud[selected_area, 3], 10, normed=1, facecolor='green', alpha=0.75)
     #plt.show()
-    scatter_plot = gl.GLScatterPlotItem(pos = point_cloud[:, :3], color = pg.glColor('g'), size = 0.1)
+    scatter_plot = gl.GLScatterPlotItem(pos = point_cloud[:, :3], color = pg.glColor('g'), size = 0.5)
     view_widget.addItem(scatter_plot)
     if bbox3D_label is not None:
         #mkPen('y', width = 3, stype=QtCore.Qt.DashLine)
         bbox3D_corners = center_to_corner_box3d(bbox3D_label)
         draw3DBox(view_widget, bbox3D_corners)
+
+    if prediction_label is not None:
+        #mkPen('y', width = 3, stype=QtCore.Qt.DashLine)
+        bbox3D_corners = center_to_corner_box3d(prediction_label)
+        draw3DBox(view_widget, bbox3D_corners, color=pg.glColor('b'))
+
 
     if (sys.flags.interactive != 1) or not hasattr(QtCore, 'PYQT_VERSION'):
         QtGui.QApplication.instance().exec_()
@@ -79,11 +85,10 @@ def center_to_corner_box3d(boxes_center):
 
     return ret
 
-def draw3DBox(w, bbox3D_corners):
+def draw3DBox(w, bbox3D_corners, color=pg.glColor('r')):
     edge_list = [[0, 1], [1, 2], [2, 3], [3, 0], 
                  [4, 5], [5, 6], [6, 7], [7, 4],
                  [0, 4], [1, 5], [2, 6], [3, 7]]
-    color = pg.glColor('r')
     for box_idx in xrange(bbox3D_corners.shape[0]):
         cur_box = bbox3D_corners[box_idx, :, :]
         for edge_idx in edge_list:
